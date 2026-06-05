@@ -65,19 +65,35 @@ def main():
 
     # ---- 一次性提醒 ----
     cur.execute(
-        "SELECT title, member_name, to_email "
-        "FROM reminders WHERE remind_date=? AND is_sent=0",
+        """
+        SELECT title, member_name, to_email
+        FROM reminders
+        WHERE remind_date=? AND is_sent=0
+        """,
         (TODAY,)
     )
+
     for row in cur.fetchall():
         send_mail(row["to_email"], row["member_name"], row["title"])
+
+        # ✅ 不用 id，用 title + member_name 标记已发送
         cur.execute(
-            "UPDATE reminders SET is_sent=1 WHERE id=?",
-            (row["id"],)
+            """
+            UPDATE reminders
+            SET is_sent=1
+            WHERE title=? AND member_name=? AND remind_date=?
+            """,
+            (row["title"], row["member_name"], TODAY)
         )
 
     # ---- 周期提醒 ----
-    cur.execute("SELECT * FROM periodic_tasks")
+    cur.execute(
+        """
+        SELECT title, member_name, to_email, interval_days, last_done, skip_weekend_holiday
+        FROM periodic_tasks
+        """
+    )
+
     for row in cur.fetchall():
         should = False
 
@@ -94,8 +110,12 @@ def main():
         if should:
             send_mail(row["to_email"], row["member_name"], row["title"])
             cur.execute(
-                "UPDATE periodic_tasks SET last_done=? WHERE id=?",
-                (TODAY, row["id"])
+                """
+                UPDATE periodic_tasks
+                SET last_done=?
+                WHERE title=? AND member_name=?
+                """,
+                (TODAY, row["title"], row["member_name"])
             )
 
     conn.commit()
