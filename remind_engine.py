@@ -34,7 +34,7 @@ def send_mail(to_addr, member, title):
 
 
 # ===============================
-# 节假日 API（仅 daily 使用）
+# 节假日 API（仅 daily）
 # ===============================
 def is_workday(d):
     try:
@@ -47,7 +47,7 @@ def is_workday(d):
 
 
 # ===============================
-# 获取实际发送日期
+# 实际应发送日期
 # ===============================
 def get_send_date(row):
     if row["repeat_rule"] is None:
@@ -87,7 +87,7 @@ def should_execute_periodic(row):
 
 
 # ===============================
-# 主逻辑
+# 主逻辑（✅ 防漏发）
 # ===============================
 def main():
     conn = sqlite3.connect(DB_PATH)
@@ -106,16 +106,18 @@ def main():
 
         # ---- 周期 ----
         else:
-            should = (
-                should_execute_periodic(row)
-                and get_send_date(row) == TODAY
-            )
+            should = should_execute_periodic(row)
 
             if should and row["repeat_rule"] == "daily":
                 if row["skip_holiday"] == 1:
                     should = is_workday(TODAY)
 
-        if should and row["send_time"] == NOW_TIME:
+        # ✅ 防漏发核心逻辑
+        if (
+            should
+            and row["send_time"] <= NOW_TIME
+            and row["last_done"] != TODAY.isoformat()
+        ):
             send_mail(row["to_email"], row["member_name"], row["title"])
 
             if row["repeat_rule"] is None:
