@@ -1,126 +1,137 @@
 import sqlite3
 import smtplib
 import os
-from datetime import date, timedelta
+import requests
+from datetime import date, datetime, timedelta
 from email.mime.text import MIMEText
 
 DB_PATH = "db/reminder.db"
-TODAY = date.today().isoformat()
+TODAY = date.today()
+NOW_TIME = datetime.now().strftime("%H:%M")
 
 EMAIL_USER = os.environ["EMAIL_USER"]
 EMAIL_PASS = os.environ["EMAIL_PASS"]
 
 
-# ================= 邮件发送 =================
+# ===============================
+# 邮件
+# ===============================
 def send_mail(to_addr, member, title):
     if not title or not to_addr:
-        print("⚠️ 跳过：标题或邮箱为空")
         return
 
-    body = f"成员：{member}\n事项：{title}\n日期：{TODAY}"
+    body = f"Member: {member}\nTitle: {title}\nDate: {TODAY}"
     msg = MIMEText(body, "plain", "utf-8")
-    msg["Subject"] = f"🔔 提醒 - {TODAY}"
+    msg["Subject"] = f"🔔 Reminder - {TODAY}"
     msg["From"] = EMAIL_USER
     msg["To"] = to_addr
 
-    try:
-        server = smtplib.SMTP_SSL("smtp.qq.com", 465)
-        server.login(EMAIL_USER, EMAIL_PASS)
-        server.sendmail(EMAIL_USER, to_addr, msg.as_string())
-        server.quit()
-        print(f"✅ 已发送 -> {to_addr} ({member})")
-    except Exception as e:
-        print(f"❌ 发送失败 {to_addr}: {e}")
+    server = smtplib.SMTP_SSL("smtp.qq.com", 465)
+    server.login(EMAIL_USER, EMAIL_PASS)
+    server.sendmail(EMAIL_USER, to_addr, msg.as_string())
+    server.quit()
+    print(f"✅ Sent -> {to_addr}")
 
 
-# ================= 工作日判断 =================
+# ===============================
+# 节假日 API（仅 daily 使用）
+# ===============================
 def is_workday(d):
     try:
-        import requests
         return not requests.get(
-            f"https://timor.tech/api/holiday/info/{d}", timeout=5
+            f"https://timor.tech/api/holiday/info/{d}",
+            timeout=5
         ).json()["holiday"]["holiday"]
     except:
-        return False
+        return True
 
 
-# ================= 计算下次执行日期 =================
-def next_exec_date(last_done, days, skip):
-    d = date.fromisoformat(last_done)
-    while True:
-        d += timedelta(days=days)
-        if not skip or is_workday(d.isoformat()):
-            return d
-        while not is_workday(d.isoformat()):
-            d += timedelta(days=1)
+# ===============================
+# 获取实际发送日期
+# ===============================
+def get_send_date(row):
+    if row["repeat_rule"] is None:
+        target = date.fromisoformat(row["remind_date"])
+    else:
+        target = TODAY
+
+    if row["remind_type"] == "advance":
+        target -= timedelta(days=row["advance_days"])
+
+    return target
 
 
-# ================= 主逻辑 =================
+# ===============================
+# 周期判断
+# ===============================
+def should_execute_periodic(row):
+    today = TODAY
+
+    if row["repeat_rule"] == "daily":
+        return True
+
+    if row["repeat_rule"].startswith("weekly:"):
+        days = map(int, row["repeat_rule"].split(":")[1].split(","))
+        return today.weekday() in days
+
+    if row["repeat_rule"].startswith("monthly:"):
+        import calendar
+        target = int(row["repeat_rule"].split(":")[1])
+        max_day = calendar.monthrange(today.year, today.month)[1]
+        return today.day == min(target, max_day)
+
+    if row["repeat_rule"].startswith("yearly:"):
+        return today.strftime("%m-%d") == row["repeat_rule"].split(":")[1]
+
+    return False
+
+
+# ===============================
+# 主逻辑
+# ===============================
 def main():
-    print(f"🚀 开始运行提醒脚本，当前日期: {TODAY}")
-
     conn = sqlite3.connect(DB_PATH)
     conn.row_factory = sqlite3.Row
     cur = conn.cursor()
 
-    # ---- 一次性提醒 ----
-    cur.execute(
-        """
-        SELECT title, member_name, to_email
-        FROM reminders
-        WHERE remind_date=? AND is_sent=0
-        """,
-        (TODAY,)
-    )
+    cur.execute("SELECT * FROM reminders WHERE is_sent=0 OR is_sent IS NULL")
+    rows = cur.fetchall()
 
-    for row in cur.fetchall():
-        send_mail(row["to_email"], row["member_name"], row["title"])
-
-        # ✅ 不用 id，用 title + member_name 标记已发送
-        cur.execute(
-            """
-            UPDATE reminders
-            SET is_sent=1
-            WHERE title=? AND member_name=? AND remind_date=?
-            """,
-            (row["title"], row["member_name"], TODAY)
-        )
-
-    # ---- 周期提醒 ----
-    cur.execute(
-        """
-        SELECT title, member_name, to_email, interval_days, last_done, skip_weekend_holiday
-        FROM periodic_tasks
-        """
-    )
-
-    for row in cur.fetchall():
+    for row in rows:
         should = False
 
-        if row["last_done"] is None:
-            should = True
-        else:
-            nd = next_exec_date(
-                row["last_done"],
-                row["interval_days"],
-                bool(row["skip_weekend_holiday"])
-            )
-            should = nd.isoformat() == TODAY
+        # ---- 一次性 ----
+        if row["repeat_rule"] is None:
+            should = get_send_date(row) == TODAY
 
-        if should:
-            send_mail(row["to_email"], row["member_name"], row["title"])
-            cur.execute(
-                """
-                UPDATE periodic_tasks
-                SET last_done=?
-                WHERE title=? AND member_name=?
-                """,
-                (TODAY, row["title"], row["member_name"])
+        # ---- 周期 ----
+        else:
+            should = (
+                should_execute_periodic(row)
+                and get_send_date(row) == TODAY
             )
+
+            if should and row["repeat_rule"] == "daily":
+                if row["skip_holiday"] == 1:
+                    should = is_workday(TODAY)
+
+        if should and row["send_time"] == NOW_TIME:
+            send_mail(row["to_email"], row["member_name"], row["title"])
+
+            if row["repeat_rule"] is None:
+                cur.execute(
+                    "UPDATE reminders SET is_sent=1 WHERE id=?",
+                    (row["id"],)
+                )
+            else:
+                cur.execute(
+                    "UPDATE reminders SET last_done=? WHERE id=?",
+                    (TODAY.isoformat(), row["id"])
+                )
 
     conn.commit()
     conn.close()
-    print("🎉 执行完成")
+    print("🎉 Done")
 
 
 if __name__ == "__main__":
