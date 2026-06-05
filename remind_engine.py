@@ -18,7 +18,9 @@ DB_PATH = "db/reminder.db"
 
 EMAIL_USER = os.environ["EMAIL_USER"]
 EMAIL_PASS = os.environ["EMAIL_PASS"]
-
+print("=== DEBUG START ===")
+print(f"NOW_TIME = {NOW_TIME}")
+print(f"TODAY = {TODAY}")
 
 # ===============================
 # 邮件
