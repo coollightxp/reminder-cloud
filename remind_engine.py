@@ -2,12 +2,19 @@ import sqlite3
 import smtplib
 import os
 import requests
-from datetime import date, datetime, timedelta
+import pytz                     # ✅ 新增：时区库
+from datetime import datetime, date, timedelta
 from email.mime.text import MIMEText
 
+# ===============================
+# ✅ 强制使用北京时间
+# ===============================
+BEIJING_TZ = pytz.timezone("Asia/Shanghai")
+NOW_DT = datetime.now(BEIJING_TZ)
+TODAY = NOW_DT.date()
+NOW_TIME = NOW_DT.strftime("%H:%M")
+
 DB_PATH = "db/reminder.db"
-TODAY = date.today()
-NOW_TIME = datetime.now().strftime("%H:%M")
 
 EMAIL_USER = os.environ["EMAIL_USER"]
 EMAIL_PASS = os.environ["EMAIL_PASS"]
@@ -16,13 +23,21 @@ EMAIL_PASS = os.environ["EMAIL_PASS"]
 # ===============================
 # 邮件
 # ===============================
-def send_mail(to_addr, member, title):
+def send_mail(to_addr, member, title, content):
     if not title or not to_addr:
         return
 
-    body = f"Member: {member}\nTitle: {title}\nDate: {TODAY}"
+    body = f"""
+成员：{member}
+事项：{title}
+
+{content}
+
+发送时间：{TODAY} {NOW_TIME}
+""".strip()
+
     msg = MIMEText(body, "plain", "utf-8")
-    msg["Subject"] = f"🔔 Reminder - {TODAY}"
+    msg["Subject"] = f"🔔 提醒 - {TODAY}"
     msg["From"] = EMAIL_USER
     msg["To"] = to_addr
 
@@ -30,7 +45,7 @@ def send_mail(to_addr, member, title):
     server.login(EMAIL_USER, EMAIL_PASS)
     server.sendmail(EMAIL_USER, to_addr, msg.as_string())
     server.quit()
-    print(f"✅ Sent -> {to_addr}")
+    print(f"✅ 已发送 -> {to_addr}")
 
 
 # ===============================
@@ -47,13 +62,10 @@ def is_workday(d):
 
 
 # ===============================
-# 实际应发送日期
+# 获取实际发送日期（基于基准日）
 # ===============================
 def get_send_date(row):
-    if row["repeat_rule"] is None:
-        target = date.fromisoformat(row["remind_date"])
-    else:
-        target = TODAY
+    target = date.fromisoformat(row["remind_date"])
 
     if row["remind_type"] == "advance":
         target -= timedelta(days=row["advance_days"])
@@ -71,8 +83,11 @@ def should_execute_periodic(row):
         return True
 
     if row["repeat_rule"].startswith("weekly:"):
-        days = map(int, row["repeat_rule"].split(":")[1].split(","))
-        return today.weekday() in days
+        days = list(map(int, row["repeat_rule"].split(":")[1].split(",")))
+        for i in range(7):
+            d = today - timedelta(days=i)
+            if d.weekday() in days:
+                return True
 
     if row["repeat_rule"].startswith("monthly:"):
         import calendar
@@ -81,20 +96,21 @@ def should_execute_periodic(row):
         return today.day == min(target, max_day)
 
     if row["repeat_rule"].startswith("yearly:"):
-        return today.strftime("%m-%d") == row["repeat_rule"].split(":")[1]
+        md = row["repeat_rule"].split(":")[1]
+        return today.strftime("%m-%d") == md
 
     return False
 
 
 # ===============================
-# 主逻辑（✅ 防漏发）
+# 主逻辑（防漏发）
 # ===============================
 def main():
     conn = sqlite3.connect(DB_PATH)
     conn.row_factory = sqlite3.Row
     cur = conn.cursor()
 
-    cur.execute("SELECT * FROM reminders WHERE is_sent=0 OR is_sent IS NULL")
+    cur.execute("SELECT * FROM reminders")
     rows = cur.fetchall()
 
     for row in rows:
@@ -107,18 +123,22 @@ def main():
         # ---- 周期 ----
         else:
             should = should_execute_periodic(row)
-
             if should and row["repeat_rule"] == "daily":
                 if row["skip_holiday"] == 1:
                     should = is_workday(TODAY)
 
-        # ✅ 防漏发核心逻辑
+        # ✅ 核心：只要过了时间且今天没发过，就发
         if (
             should
             and row["send_time"] <= NOW_TIME
             and row["last_done"] != TODAY.isoformat()
         ):
-            send_mail(row["to_email"], row["member_name"], row["title"])
+            send_mail(
+                row["to_email"],
+                row["member_name"],
+                row["title"],
+                row["content"]
+            )
 
             if row["repeat_rule"] is None:
                 cur.execute(
@@ -133,7 +153,7 @@ def main():
 
     conn.commit()
     conn.close()
-    print("🎉 Done")
+    print("🎉 执行完成")
 
 
 if __name__ == "__main__":
