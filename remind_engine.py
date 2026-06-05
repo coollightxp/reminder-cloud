@@ -2,126 +2,123 @@ import sqlite3
 import requests
 import os
 import time
-import hashlib
-from datetime import timedelta
+from datetime import date, timedelta
 
+# ================= 配置区 =================
 DB_PATH = "db/reminder.db"
 
-BOT_ID = os.environ["WX_BOT_ID"]
-BOT_SECRET = os.environ["WX_BOT_SECRET"]
+CORP_ID = os.environ["WX_CORP_ID"]
+AGENT_ID = int(os.environ["WX_AGENT_ID"])
+SECRET = os.environ["WX_CORP_SECRET"]
 
-TODAY = time.strftime("%Y-%m-%d")
+TODAY = date.today().isoformat()
 
-# ---------------------------
-# 企业微信群机器人签名
-# ---------------------------
-def get_sign():
-    timestamp = str(int(time.time()))
-    signature = hashlib.sha256((BOT_SECRET + timestamp).encode()).hexdigest()
-    return timestamp, signature
+# Token 缓存（防止频繁请求）
+_TOKEN_CACHE = {"token": None, "expire": 0}
+# ==========================================
 
 
-def send_text(content, mentioned=None):
-    """
-    发送文本消息
-    :param content: 消息内容
-    :param mentioned: ['@张三'] 或 ['@all']
-    """
-    timestamp, signature = get_sign()
+def get_access_token():
+    """获取企业微信 Access Token（自动缓存）"""
+    if _TOKEN_CACHE["token"] and time.time() < _TOKEN_CACHE["expire"]:
+        return _TOKEN_CACHE["token"]
 
-    url = "https://qyapi.weixin.qq.com/cgi-bin/webhook/send"
-    params = {
-        "key": BOT_ID,
-        "timestamp": timestamp,
-        "signature": signature
-    }
+    url = "https://qyapi.weixin.qq.com/cgi-bin/gettoken"
+    params = {"corpid": CORP_ID, "corpsecret": SECRET}
+
+    try:
+        resp = requests.get(url, params=params, timeout=10).json()
+        if resp.get("errcode") != 0:
+            raise RuntimeError(f"获取 Token 失败: {resp}")
+
+        _TOKEN_CACHE["token"] = resp["access_token"]
+        # 提前 5 分钟过期，防止临界值失效
+        _TOKEN_CACHE["expire"] = time.time() + resp["expires_in"] - 300
+        return _TOKEN_CACHE["token"]
+    except Exception as e:
+        raise RuntimeError(f"请求 Token 接口异常: {e}")
+
+
+def send_message(content, touser="@all"):
+    """发送文本消息到企业微信"""
+    token = get_access_token()
+    url = f"https://qyapi.weixin.qq.com/cgi-bin/message/send?access_token={token}"
 
     payload = {
+        "touser": touser,
         "msgtype": "text",
-        "text": {
-            "content": content
-        }
+        "agentid": AGENT_ID,
+        "text": {"content": content},
+        "safe": 0
     }
 
-    if mentioned:
-        payload["text"]["mentioned_list"] = mentioned
-
-    r = requests.post(url, params=params, json=payload)
-
-    if r.json().get("errcode") != 0:
-        raise RuntimeError(f"企业微信发送失败: {r.text}")
+    r = requests.post(url, json=payload, timeout=10).json()
+    if r.get("errcode") != 0:
+        raise RuntimeError(f"发送消息失败: {r}")
 
 
-# ---------------------------
-# 节假日判断（timor.tech）
-# ---------------------------
-def is_workday(date_str):
+# ----------------- 辅助函数 -----------------
+def is_workday(d):
+    """判断是否为工作日（调用 timor.tech API）"""
     try:
-        r = requests.get(
-            f"https://timor.tech/api/holiday/info/{date_str}",
-            timeout=5
-        )
+        r = requests.get(f"https://timor.tech/api/holiday/info/{d}", timeout=5)
         return not r.json()["holiday"]["holiday"]
-    except Exception:
+    except:
         return False
 
 
-def next_exec_date(last_done, interval_days, skip):
-    d = last_done
+def next_exec_date(last_done, days, skip):
+    """计算周期任务的下一个执行日期"""
+    d = date.fromisoformat(last_done)
     while True:
-        d += timedelta(days=interval_days)
+        d += timedelta(days=days)
         if not skip or is_workday(d.isoformat()):
             return d
+        # 如果跳过节假日，且当天是假期，则继续往后推
         while not is_workday(d.isoformat()):
             d += timedelta(days=1)
 
 
-# ---------------------------
-# 主逻辑
-# ---------------------------
+# ----------------- 主逻辑 -----------------
 def main():
     conn = sqlite3.connect(DB_PATH)
     conn.row_factory = sqlite3.Row
     cur = conn.cursor()
 
-    # 一次性提醒
-    for title, at_name in cur.execute("""
-        SELECT r.title, m.at_name
+    # 1. 处理一次性提醒
+    for row in cur.execute("""
+        SELECT r.title, m.at_name, COALESCE(m.open_userid, '@all') AS uid
         FROM reminders r
         JOIN wechat_members m ON r.member_id = m.id
         WHERE r.remind_date = ? AND r.is_sent = 0
     """, (TODAY,)):
-        mentioned = ["@all"] if at_name == "@all" else [at_name.lstrip("@")]
-        send_text(f"{title}", mentioned=mentioned)
-
+        send_message(f"{row['at_name']} {row['title']}", row['uid'])
         cur.execute(
-            "UPDATE reminders SET is_sent = 1 WHERE title = ? AND remind_date = ?",
-            (title, TODAY)
+            "UPDATE reminders SET is_sent = 1 WHERE id = ?",
+            (row["id"],)
         )
 
-    # 周期提醒
-    for title, days, last_done, mid, at_name, skip in cur.execute("""
-        SELECT r.title, r.interval_days, r.last_done,
-               r.member_id, m.at_name, r.skip_weekend_holiday
+    # 2. 处理周期提醒
+    for row in cur.execute("""
+        SELECT r.id, r.title, r.interval_days, r.last_done,
+               m.at_name, r.skip_weekend_holiday,
+               COALESCE(m.open_userid, '@all') AS uid
         FROM periodic_tasks r
         JOIN wechat_members m ON r.member_id = m.id
     """):
-        if last_done is None:
-            exec_date = TODAY
+        should_run = False
+        if row["last_done"] is None:
+            should_run = True
         else:
-            exec_date = next_exec_date(
-                last_done=datetime.datetime.strptime(last_done, "%Y-%m-%d").date(),
-                interval_days=days,
-                skip=bool(skip)
-            )
+            next_day = next_exec_date(row["last_done"], row["interval_days"], row["skip_weekend_holiday"])
+            if next_day.isoformat() == TODAY:
+                should_run = True
 
-        if exec_date.isoformat() == TODAY:
-            mentioned = ["@all"] if at_name == "@all" else [at_name.lstrip("@")]
-            send_text(f"{title}", mentioned=mentioned)
-
+        if should_run:
+            send_message(f"{row['at_name']} {row['title']}", row['uid'])
             cur.execute(
                 "UPDATE periodic_tasks SET last_done = ? WHERE id = ?",
-                (TODAY, mid)
+                (TODAY, row["id"])
             )
 
     conn.commit()
