@@ -4,7 +4,17 @@ import os
 import requests
 from datetime import date, datetime, timedelta
 from email.mime.text import MIMEText
+import datetime
 
+# ... 其他代码 ...
+
+def main():
+    # 【加这两行】打印当前服务器时间，看看是不是你以为的时间
+    now = datetime.datetime.now()
+    print(f"🔴 当前服务器时间是: {now}")
+    print(f"🔴 当前时区是: {now.astimezone().tzinfo}")
+    
+    # ... 原来的逻辑 ...
 DB_PATH = "db/reminder.db"
 TODAY = date.today()
 NOW_TIME = datetime.now().strftime("%H:%M")
