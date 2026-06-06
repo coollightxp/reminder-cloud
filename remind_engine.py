@@ -46,37 +46,54 @@ def parse_time(t):
     return None
 
 # ===============================
-# 周期判断（✅ 支持提前 N 天）
+# 核心算法：周期性任务自动计算发送日
 # ===============================
-def should_execute_periodic(row):
+def calc_periodic_send_date(row):
     """
-    判断今天是否符合周期规则
-    返回: (是否匹配, 原定日期)
+    适用于周期性任务：
+    - repeat_rule 有值 (monthly:9)
+    - advance_days 生效 (3)
+    - remind_date 为空
+
+    返回: (是否今天发, 原定日期, 实际发送日)
     """
-    wd = TODAY.weekday()
     rule = row["repeat_rule"]
-    target_date = TODAY
+    advance = int(row["advance_days"] or 0)
+    today = TODAY
 
+    # ---- daily ----
     if rule == "daily":
-        return True, TODAY
+        target = today
+        send = target - timedelta(days=advance)
+        return today == send, target, send
 
+    # ---- weekly ----
     if rule.startswith("weekly:"):
+        wd = today.weekday()
         days = list(map(int, rule.split(":")[1].split(",")))
-        return wd in days, TODAY
+        if wd not in days:
+            return False, today, today
+        target = today
+        send = target - timedelta(days=advance)
+        return today == send, target, send
 
+    # ---- monthly ----
     if rule.startswith("monthly:"):
         target_day = int(rule.split(":")[1])
-        max_day = calendar.monthrange(TODAY.year, TODAY.month)[1]
-        actual_target_day = min(target_day, max_day)
-        target_date = date(TODAY.year, TODAY.month, actual_target_day)
-        return TODAY.day == actual_target_day, target_date
+        max_day = calendar.monthrange(today.year, today.month)[1]
+        actual_target = min(target_day, max_day)
+        target = date(today.year, today.month, actual_target)
+        send = target - timedelta(days=advance)
+        return today == send, target, send
 
+    # ---- yearly ----
     if rule.startswith("yearly:"):
         md = rule.split(":")[1]
-        target_date = datetime.strptime(f"{TODAY.year}-{md}", "%Y-%m-%d").date()
-        return TODAY.strftime("%m-%d") == md, target_date
+        target = datetime.strptime(f"{today.year}-{md}", "%Y-%m-%d").date()
+        send = target - timedelta(days=advance)
+        return today == send, target, send
 
-    return False, None
+    return False, today, today
 
 # ===============================
 # 邮件发送
@@ -116,47 +133,39 @@ def main():
         print(f"检查任务 ID: {row['id']} | 标题: {row['title']}")
         can_send_today = False
 
-        # ---- 1. 一次性任务 ----
+        # ---- 1. 一次性任务（用 remind_date） ----
         if row["repeat_rule"] is None:
             print("\n🟢 [类型] 一次性任务")
-
             try:
                 target_date = date.fromisoformat(row["remind_date"])
             except Exception as e:
                 print(f"❌ remind_date 解析失败: {e}")
                 continue
 
-            advance_days = int(row["advance_days"]) if row["advance_days"] not in (None, "") else 0
-            send_on_date = target_date - timedelta(days=advance_days)
+            advance = int(row["advance_days"] or 0)
+            send_on_date = target_date - timedelta(days=advance)
 
-            print(f"   原定日期: {target_date} | 提前: {advance_days}天")
+            print(f"   原定日期: {target_date}")
+            print(f"   提前天数: {advance}")
             print(f"   ➜ 应发送日: {send_on_date} | 今天: {TODAY}")
 
             if send_on_date != TODAY:
                 print("❌ 结论：日期不匹配，跳过")
                 continue
-
             can_send_today = True
 
-        # ---- 2. 周期性任务 ----
+        # ---- 2. 周期性任务（自动计算） ----
         else:
             print("\n🟢 [类型] 周期性任务")
-            is_match, target_date = should_execute_periodic(row)
+            ok, target_date, send_on_date = calc_periodic_send_date(row)
 
-            if not is_match:
-                print(f"❌ 结论：今天不符合周期规则 ({row['repeat_rule']})")
-                continue
-
-            print(f"✅ 结论：今天符合周期规则")
-
-            advance_days = int(row["advance_days"]) if row["advance_days"] not in (None, "") else 0
-            send_on_date = target_date - timedelta(days=advance_days)
-
-            print(f"   原定日期: {target_date} | 提前: {advance_days}天")
+            print(f"   规则: {row['repeat_rule']}")
+            print(f"   原定日期: {target_date}")
+            print(f"   提前天数: {row['advance_days']}")
             print(f"   ➜ 应发送日: {send_on_date} | 今天: {TODAY}")
 
-            if send_on_date != TODAY:
-                print("❌ 结论：不是提前提醒日，跳过")
+            if not ok:
+                print("❌ 结论：今天不是发送日")
                 continue
 
             # 每日任务跳过节假日
