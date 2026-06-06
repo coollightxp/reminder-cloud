@@ -3,7 +3,7 @@ name: Remind Scheduler
 on:
   # 定时触发（每 5 分钟一次）
   schedule:
-    - cron: "*/5 * * * *"
+    - cron: "* * * * *"
 
   # 允许手动触发（调试用）
   workflow_dispatch:
