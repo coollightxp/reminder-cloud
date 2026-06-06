@@ -1,9 +1,12 @@
 name: Remind Scheduler
 
 on:
+  # 定时触发（每 5 分钟一次）
   schedule:
-    - cron: "*/5 * * * *"   # 每 5 分钟运行一次
-  workflow_dispatch:         # 允许手动运行
+    - cron: "*/5 * * * *"
+
+  # 允许手动触发（调试用）
+  workflow_dispatch:
 
 jobs:
   run:
