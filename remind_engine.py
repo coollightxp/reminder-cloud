@@ -34,7 +34,7 @@ def is_workday(d):
         return True
 
 # ===============================
-# 时间解析（兼容 HH:MM / HH:MM:SS）
+# 时间解析
 # ===============================
 def parse_time(t):
     t = str(t).strip()
@@ -49,25 +49,15 @@ def parse_time(t):
 # 核心算法：周期性任务自动计算发送日
 # ===============================
 def calc_periodic_send_date(row):
-    """
-    适用于周期性任务：
-    - repeat_rule 有值 (monthly:9)
-    - advance_days 生效 (3)
-    - remind_date 为空
-
-    返回: (是否今天发, 原定日期, 实际发送日)
-    """
     rule = row["repeat_rule"]
     advance = int(row["advance_days"] or 0)
     today = TODAY
 
-    # ---- daily ----
     if rule == "daily":
         target = today
         send = target - timedelta(days=advance)
         return today == send, target, send
 
-    # ---- weekly ----
     if rule.startswith("weekly:"):
         wd = today.weekday()
         days = list(map(int, rule.split(":")[1].split(",")))
@@ -77,7 +67,6 @@ def calc_periodic_send_date(row):
         send = target - timedelta(days=advance)
         return today == send, target, send
 
-    # ---- monthly ----
     if rule.startswith("monthly:"):
         target_day = int(rule.split(":")[1])
         max_day = calendar.monthrange(today.year, today.month)[1]
@@ -86,7 +75,6 @@ def calc_periodic_send_date(row):
         send = target - timedelta(days=advance)
         return today == send, target, send
 
-    # ---- yearly ----
     if rule.startswith("yearly:"):
         md = rule.split(":")[1]
         target = datetime.strptime(f"{today.year}-{md}", "%Y-%m-%d").date()
@@ -113,8 +101,10 @@ def send_mail(to_email, member_name, title, content):
         server.sendmail(user, [to_email], msg.as_string())
         server.quit()
         print(f"✅ 邮件发送成功 -> {to_email}")
+        return True
     except Exception as e:
         print(f"❌ 邮件发送失败: {e}")
+        return False
 
 # ===============================
 # 主逻辑
@@ -133,9 +123,14 @@ def main():
         print(f"检查任务 ID: {row['id']} | 标题: {row['title']}")
         can_send_today = False
 
-        # ---- 1. 一次性任务（用 remind_date） ----
+        # ---- 1. 一次性任务 ----
         if row["repeat_rule"] is None:
             print("\n🟢 [类型] 一次性任务")
+
+            if row["is_sent"] == 1:
+                print("❌ 结论：is_sent=1，已发送或正在发送，跳过")
+                continue
+
             try:
                 target_date = date.fromisoformat(row["remind_date"])
             except Exception as e:
@@ -152,9 +147,10 @@ def main():
             if send_on_date != TODAY:
                 print("❌ 结论：日期不匹配，跳过")
                 continue
+
             can_send_today = True
 
-        # ---- 2. 周期性任务（自动计算） ----
+        # ---- 2. 周期性任务 ----
         else:
             print("\n🟢 [类型] 周期性任务")
             ok, target_date, send_on_date = calc_periodic_send_date(row)
@@ -168,7 +164,10 @@ def main():
                 print("❌ 结论：今天不是发送日")
                 continue
 
-            # 每日任务跳过节假日
+            if row["last_done"] == TODAY.isoformat():
+                print("❌ 结论：last_done 已标记，跳过")
+                continue
+
             if row["repeat_rule"] == "daily" and row["skip_holiday"] == 1:
                 if not is_workday(TODAY):
                     print("❌ 结论：节假日，跳过")
@@ -176,7 +175,7 @@ def main():
 
             can_send_today = True
 
-        # ---- 3. 时间宽容 + 防重发 ----
+        # ---- 3. 时间宽容 + 防重发 + 失败回滚 ----
         if can_send_today:
             send_time_obj = parse_time(row["send_time"])
             print(f"   发送时间: {send_time_obj} | 当前时间: {NOW_TIME}")
@@ -185,23 +184,51 @@ def main():
                 print("❌ 结论：时间未到，跳过")
                 continue
 
-            if row["last_done"] == TODAY.isoformat():
-                print("❌ 结论：今天已发过，跳过")
+            print("🚀 条件全部满足，准备锁定并发送！")
+
+            # ==========================================
+            # ✅ 第一步：先锁住（防止并发重发）
+            # ==========================================
+            try:
+                if row["repeat_rule"] is None:
+                    cur.execute("UPDATE reminders SET is_sent=1 WHERE id=?", (row["id"],))
+                else:
+                    cur.execute("UPDATE reminders SET last_done=? WHERE id=?", (TODAY.isoformat(), row["id"]))
+                conn.commit()
+                print(f"✅ 任务已锁定 (ID: {row['id']})")
+            except Exception as e:
+                print(f"❌ 数据库锁定失败: {e}")
                 continue
 
-            print("🚀 条件全部满足，准备发送！")
-            send_mail(
+            # ==========================================
+            # ✅ 第二步：发邮件（带回滚机制）
+            # ==========================================
+            mail_result = send_mail(
                 row["to_email"],
                 row["member_name"],
                 row["title"],
                 row["content"]
             )
 
-            if row["repeat_rule"] is None:
-                cur.execute("UPDATE reminders SET is_sent=1 WHERE id=?", (row["id"],))
+            # ==========================================
+            # ✅ 第三步：根据结果修正状态
+            # ==========================================
+            if mail_result:
+                # 发送成功：保持锁定状态（一次性任务 is_sent=1，周期性任务 last_done=今天）
+                print("✅ 流程结束：发送成功，状态已固化")
             else:
-                cur.execute("UPDATE reminders SET last_done=? WHERE id=?", (TODAY.isoformat(), row["id"]))
-            conn.commit()
+                # 发送失败：回滚状态，允许下次重试
+                print("🔄 发送失败，正在回滚状态以允许重试...")
+                try:
+                    if row["repeat_rule"] is None:
+                        cur.execute("UPDATE reminders SET is_sent=0 WHERE id=?", (row["id"],))
+                    else:
+                        cur.execute("UPDATE reminders SET last_done=NULL WHERE id=?", (row["id"],))
+                    conn.commit()
+                    print("✅ 状态已回滚，下次运行将重试")
+                except Exception as rollback_err:
+                    print(f"❌ 状态回滚失败: {rollback_err}")
+
         else:
             print("\n⏸️ 该任务今日不发送")
 
