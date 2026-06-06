@@ -4,7 +4,7 @@ import smtplib
 from email.mime.text import MIMEText
 from email.header import Header
 import pytz
-from datetime import datetime, date, time
+from datetime import datetime, date, time, timedelta  # ✅ 引入 timedelta
 import json
 import urllib.request
 
@@ -18,7 +18,7 @@ NOW_TIME = NOW_DT.time()
 TODAY = date.today()
 
 # ===============================
-# 节假日判断
+# 节假日 / 工作日判断
 # ===============================
 def is_workday(d):
     try:
@@ -27,7 +27,7 @@ def is_workday(d):
             data = json.loads(resp.read().decode())
             return data.get("code", 0) == 0
     except Exception as e:
-        print(f"⚠️ 节假日接口失败: {e}")
+        print(f"⚠️ 获取节假日接口失败: {e}")
         return True
 
 # ===============================
@@ -43,7 +43,15 @@ def parse_time(t):
     return None
 
 # ===============================
-# 周期判断（你之前的逻辑）
+# 获取目标日期（remind_date）
+# ===============================
+def get_send_date(row):
+    if row["remind_date"]:
+        return date.fromisoformat(row["remind_date"])
+    return TODAY
+
+# ===============================
+# 周期判断
 # ===============================
 def should_execute_periodic(row):
     wd = TODAY.weekday()
@@ -68,7 +76,7 @@ def should_execute_periodic(row):
     return False
 
 # ===============================
-# 发送邮件
+# 邮件发送
 # ===============================
 def send_mail(to_email, member_name, title, content):
     user = os.environ["EMAIL_USER"]
@@ -89,7 +97,7 @@ def send_mail(to_email, member_name, title, content):
         print(f"❌ 邮件发送失败: {e}")
 
 # ===============================
-# 主逻辑（✅ 使用 reminders 表）
+# 主逻辑（✅ 支持提前 N 天）
 # ===============================
 def main():
     print(f"🚀 开始执行 - 当前时间: {NOW_DT}")
@@ -97,20 +105,26 @@ def main():
     conn = sqlite3.connect(DB_PATH)
     conn.row_factory = sqlite3.Row
     cur = conn.cursor()
-
-    # ✅ 关键：表名是 reminders
     cur.execute("SELECT * FROM reminders")
     rows = cur.fetchall()
 
     for row in rows:
         can_send_today = False
 
-        # ---- 一次性 ----
+        # ---- 1. 一次性任务（核心：支持提前提醒） ----
         if row["repeat_rule"] is None:
-            if row["remind_date"] == TODAY.isoformat():
+            target_date = get_send_date(row)
+            send_on_date = target_date
+
+            # ✅ 关键：计算提前 N 天
+            advance_days = row.get("advance_days", 0)
+            if advance_days and advance_days > 0:
+                send_on_date = target_date - timedelta(days=advance_days)
+
+            if send_on_date == TODAY:
                 can_send_today = True
 
-        # ---- 周期性 ----
+        # ---- 2. 周期性任务 ----
         else:
             if should_execute_periodic(row):
                 can_send_today = True
@@ -118,7 +132,7 @@ def main():
                 if not is_workday(TODAY):
                     can_send_today = False
 
-        # ---- 时间宽容 + 防重发 ----
+        # ---- 3. 时间宽容 + 防重发 ----
         if can_send_today:
             send_time_obj = parse_time(row["send_time"])
             if (
