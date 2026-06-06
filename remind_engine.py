@@ -1,192 +1,64 @@
-import sqlite3
-import os
-import smtplib
-from email.mime.text import MIMEText
-from email.header import Header
-import pytz
-from datetime import datetime, date, time, timedelta
-import json
-import urllib.request
+# ---- 2. 周期性任务（支持提前 N 天） ----
+else:
+    print("\n🟢 [类型] 周期性任务")
+    print(f"   原始规则: {row['repeat_rule']}")
+    
+    target_date = None
+    is_match = False
 
-# ===============================
-# 基础配置
-# ===============================
-DB_PATH = os.path.join(os.path.dirname(__file__), "db", "reminder.db")
-BEIJING_TZ = pytz.timezone("Asia/Shanghai")
-NOW_DT = datetime.now(BEIJING_TZ)
-NOW_TIME = NOW_DT.time()
-TODAY = date.today()
-
-print(f"\n🚀 脚本启动 - 当前时间: {NOW_DT.strftime('%Y-%m-%d %H:%M:%S')}\n")
-
-# ===============================
-# 节假日 / 工作日判断
-# ===============================
-def is_workday(d):
-    try:
-        url = f"https://natescarlet.coding.net/p/holiday/d/holiday/git/raw/master/{d.year}/{d}.json"
-        with urllib.request.urlopen(url, timeout=5) as resp:
-            data = json.loads(resp.read().decode())
-            return data.get("code", 0) == 0
-    except Exception as e:
-        print(f"⚠️ 节假日接口失败: {e}")
-        return True
-
-# ===============================
-# 时间解析（兼容 HH:MM / HH:MM:SS）
-# ===============================
-def parse_time(t):
-    t = str(t).strip()
-    for fmt in ("%H:%M:%S", "%H:%M"):
-        try:
-            return datetime.strptime(t, fmt).time()
-        except ValueError:
-            continue
-    return None
-
-# ===============================
-# 周期判断
-# ===============================
-def should_execute_periodic(row):
-    wd = TODAY.weekday()
-    rule = row["repeat_rule"]
-
-    if rule == "daily":
-        return True
-    if rule.startswith("weekly:"):
-        days = list(map(int, rule.split(":")[1].split(",")))
-        return wd in days
-    if rule.startswith("monthly:"):
+    # ① 先计算“今天是否符合周期规则”
+    if row["repeat_rule"] == "daily":
+        is_match = True
+        print("   匹配规则: 每天")
+    elif row["repeat_rule"].startswith("weekly:"):
+        wd = TODAY.weekday()
+        days = list(map(int, row["repeat_rule"].split(":")[1].split(",")))
+        if wd in days:
+            is_match = True
+        print(f"   匹配规则: 每周 {days} | 今天是周 {wd}")
+    elif row["repeat_rule"].startswith("monthly:"):
         import calendar
-        target = int(rule.split(":")[1])
+        target_day = int(row["repeat_rule"].split(":")[1])
         max_day = calendar.monthrange(TODAY.year, TODAY.month)[1]
-        return TODAY.day == min(target, max_day)
-    if rule.startswith("yearly:"):
-        md = rule.split(":")[1]
-        return TODAY.strftime("%m-%d") == md
-    return False
+        actual_target_day = min(target_day, max_day)
+        target_date = date(TODAY.year, TODAY.month, actual_target_day)
+        if TODAY.day == actual_target_day:
+            is_match = True
+        print(f"   匹配规则: 每月 {target_day} 号 | 今天是 {TODAY.day} 号")
+    elif row["repeat_rule"].startswith("yearly:"):
+        md = row["repeat_rule"].split(":")[1]
+        if TODAY.strftime("%m-%d") == md:
+            is_match = True
+        print(f"   匹配规则: 每年 {md} | 今天是 {TODAY.strftime('%m-%d')}")
 
-# ===============================
-# 邮件发送
-# ===============================
-def send_mail(to_email, member_name, title, content):
-    user = os.environ["EMAIL_USER"]
-    pwd = os.environ["EMAIL_PASS"]
+    # ② 如果是节假日，直接跳过（仅限 daily）
+    if row["repeat_rule"] == "daily" and row["skip_holiday"] == 1:
+        if not is_workday(TODAY):
+            print("❌ 结论：节假日，跳过")
+            continue
 
-    msg = MIMEText(content, "plain", "utf-8")
-    msg["From"] = user
-    msg["To"] = to_email
-    msg["Subject"] = Header(title, "utf-8")
-
-    try:
-        server = smtplib.SMTP_SSL("smtp.qq.com", 465)
-        server.login(user, pwd)
-        server.sendmail(user, [to_email], msg.as_string())
-        server.quit()
-        print(f"✅ 邮件发送成功 -> {to_email}")
-    except Exception as e:
-        print(f"❌ 邮件发送失败: {e}")
-
-# ===============================
-# 主逻辑（全调试日志版）
-# ===============================
-def main():
-    conn = sqlite3.connect(DB_PATH)
-    conn.row_factory = sqlite3.Row
-    cur = conn.cursor()
-    cur.execute("SELECT * FROM reminders")
-    rows = cur.fetchall()
-
-    print(f"📊 共加载 {len(rows)} 条提醒\n")
-
-    for row in rows:
-        print("==============================================")
-        print(f"检查任务 ID: {row['id']} | 标题: {row['title']}")
-        can_send_today = False
-
-        # ---- 1. 一次性任务（带完整诊断） ----
-        if row["repeat_rule"] is None:
-            print("\n🟢 [类型] 一次性任务")
-
-            # ① remind_date
-            try:
-                target_date = date.fromisoformat(row["remind_date"])
-            except Exception as e:
-                print(f"❌ remind_date 解析失败: {row['remind_date']} | {e}")
-                continue
-
-            # ② advance_days
-            adv = row["advance_days"]
-            advance_days = int(adv) if adv not in (None, "") else 0
-
-            # ③ 计算发送日
+    # ③ ✅ 核心：处理提前 N 天（关键修复点）
+    if is_match:
+        advance_days = int(row["advance_days"]) if row["advance_days"] not in (None, "") else 0
+        
+        # 如果是每月/每年，我们需要基于“原定日期”往前推
+        if row["repeat_rule"].startswith(("monthly:", "yearly:")):
+            if target_date is None: # 兜底，一般不会发生
+                target_date = TODAY
+            
             send_on_date = target_date - timedelta(days=advance_days)
-
-            print(f"   原定日期: {target_date}")
-            print(f"   提前天数: {advance_days}")
-            print(f"   ➜ 实际应发送日: {send_on_date}")
-            print(f"   今天是: {TODAY}")
-
+            print(f"   原定日期: {target_date} | 提前 {advance_days} 天")
+            print(f"   ➜ 实际发送日: {send_on_date}")
+            
             if send_on_date != TODAY:
-                print("❌ 结论：日期不匹配，跳过")
+                print("❌ 结论：今天不是提前提醒日，跳过")
                 continue
-
-            print("✅ 结论：日期匹配")
-
-            # ④ 时间判断
-            send_time_obj = parse_time(row["send_time"])
-            print(f"   发送时间: {send_time_obj}")
-            print(f"   当前时间: {NOW_TIME}")
-
-            if not send_time_obj or send_time_obj > NOW_TIME:
-                print("❌ 结论：时间未到，跳过")
-                continue
-
-            print("✅ 结论：时间已过")
-
-            # ⑤ last_done
-            print(f"   last_done: {repr(row['last_done'])}")
-            if row["last_done"] == TODAY.isoformat():
-                print("❌ 结论：今天已发过，跳过")
-                continue
-
-            print("✅ 结论：今天尚未发送")
-            can_send_today = True
-
-        # ---- 2. 周期性任务 ----
         else:
-            print("\n🟢 [类型] 周期性任务")
-            if should_execute_periodic(row):
-                print("✅ 结论：今天符合周期规则")
-                can_send_today = True
-            else:
-                print("❌ 结论：今天不符合周期规则")
-
-            if row["repeat_rule"] == "daily" and row["skip_holiday"] == 1:
-                if not is_workday(TODAY):
-                    print("❌ 结论：节假日，跳过")
-                    can_send_today = False
-
-        # ---- 3. 执行发送 ----
-        if can_send_today:
-            print("\n🚀 准备发送邮件...")
-            send_mail(
-                row["to_email"],
-                row["member_name"],
-                row["title"],
-                row["content"]
-            )
-
-            if row["repeat_rule"] is None:
-                cur.execute("UPDATE reminders SET is_sent=1 WHERE id=?", (row["id"],))
-            else:
-                cur.execute("UPDATE reminders SET last_done=? WHERE id=?", (TODAY.isoformat(), row["id"]))
-            conn.commit()
-        else:
-            print("\n⏸️ 该任务今日不发送")
-
-    conn.close()
-    print("\n🎉 执行完成")
-
-if __name__ == "__main__":
-    main()
+            # 每天或每周，直接看今天
+            if advance_days > 0:
+                print(f"⚠️ 注意：每日/每周任务不建议设置提前天数，建议用具体时间代替")
+        
+        print("✅ 结论：今天符合周期规则")
+        can_send_today = True
+    else:
+        print("❌ 结论：今天不符合周期规则")
