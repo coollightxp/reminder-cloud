@@ -9,98 +9,68 @@ This project is designed to run on **GitHub Actions**.
 
 ## ✨ Features
 
-*   **Database-Driven**: All reminder rules are managed via SQL.
-*   **Time-Window Sending**: Emails are sent only after the configured `send_time`.
-*   **Recurring Rules**:
-    *   `weekly:1` (Monday) to `weekly:7` (Sunday)
-    *   `monthly:5` (5th day of the month)
-*   **Holiday Skip**: Option to skip sending on weekends or public holidays (China).
-*   **Idempotent**: Guarantees that each reminder is sent only once per day.
+- **Database-Driven**: All reminder rules are managed via SQL.
+- **Time-Window Sending**: Emails are sent only after the configured `send_time`.
+- **Human-Friendly Recurring Rules**:
+  - `weekly:1` (Monday) to `weekly:7` (Sunday)
+  - `monthly:5` (5th day of the month)
+- **Holiday Skip**: Option to skip sending on weekends or public holidays (China).
+- **Idempotent**: Guarantees that each reminder is sent only once per day.
 
 ## 🛠️ Tech Stack
 
-*   **Language**: Python 3.10
-*   **Database**: MySQL (Aiven Cloud)
-*   **Scheduler**: GitHub Actions
-*   **Email**: SMTP (QQ Mail Example)
+- **Language**: Python 3.10
+- **Database**: MySQL (Aiven Cloud)
+- **Scheduler**: GitHub Actions (Hourly)
+- **Email**: SMTP (QQ Mail Example)
 
 ## 🚀 Setup Guide
 
 ### 1. Database Setup (Aiven)
-Create a MySQL table using the following SQL:
-没问题，为了方便你复制，我把英文版和中文版的 README 内容合并到一个代码块里了。
-你只需要：
-把 英文部分​ 复制保存到 README.md
-把 中文部分​ 复制保存到 README.zh-CN.md
-# ==================================================
-# 📄 README.md (English Version)
-# ==================================================
 
-<div align="right">
-  <a href="./README.zh-CN.md">🇨🇳 切换到中文文档</a>
-</div>
-
-<br>
-
-# 📅 Daily Reminder System
-
-An automated reminder system that sends emails based on configurations stored in a MySQL database. It supports one-time notifications, general reminders, and recurring important reminders (daily/weekly/monthly).
-
-This project is designed to run on **GitHub Actions**.
-
-## ✨ Features
-
-*   **Database-Driven**: All reminder rules are managed via SQL.
-*   **Time-Window Sending**: Emails are sent only after the configured `send_time`.
-*   **Recurring Rules**:
-    *   `weekly:1` (Monday) to `weekly:7` (Sunday)
-    *   `monthly:5` (5th day of the month)
-*   **Holiday Skip**: Option to skip sending on weekends or public holidays (China).
-*   **Idempotent**: Guarantees that each reminder is sent only once per day.
-
-## 🛠️ Tech Stack
-
-*   **Language**: Python 3.10
-*   **Database**: MySQL (Aiven Cloud)
-*   **Scheduler**: GitHub Actions
-*   **Email**: SMTP (QQ Mail Example)
-
-## 🚀 Setup Guide
-
-### 1. Database Setup (Aiven)
 Create a MySQL table using the following SQL:
 sql
 CREATE TABLE reminders (
 id INT AUTO_INCREMENT PRIMARY KEY,
-title VARCHAR(255) NOT NULL,
-content TEXT NOT NULL,
-to_email VARCHAR(255) NOT NULL,
-member_name VARCHAR(100),
-remind_type ENUM('notify', 'normal', 'important') DEFAULT 'normal',
-event_date DATE NOT NULL,
-expire_date DATE,
-send_time TIME DEFAULT '09:00:00',
-repeat_rule VARCHAR(50), -- e.g., 'weekly:1' or 'monthly:5'
-advance_days INT DEFAULT 0,
-skip_holiday TINYINT DEFAULT 1,
+title VARCHAR(255) NOT NULL COMMENT 'Email Title',
+content TEXT NOT NULL COMMENT 'Email Content',
+to_email VARCHAR(255) NOT NULL COMMENT 'Recipient',
+member_name VARCHAR(100) COMMENT 'Member Name',
+remind_type ENUM('notify', 'normal', 'important') DEFAULT 'normal' COMMENT 'Reminder Type',
+event_date DATE NOT NULL COMMENT 'Event Date',
+expire_date DATE COMMENT 'Expiration Date for Important Reminders',
+send_time TIME DEFAULT '09:00:00' COMMENT 'Send Time',
+repeat_rule VARCHAR(50) COMMENT 'weekly:1 / monthly:5',
+advance_days INT DEFAULT 0 COMMENT 'Advance Days',
+skip_holiday TINYINT DEFAULT 1 COMMENT 'Skip Holidays',
 status ENUM('pending', 'notified', 'completed') DEFAULT 'pending',
-last_sent_date DATE DEFAULT NULL
-);
+last_sent_date DATE DEFAULT NULL COMMENT 'Last Sent Date'
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+纯文本
 ### 2. GitHub Secrets Configuration
+
 Go to `Settings > Secrets and variables > Actions` and add the following:
 
-*   `DB_HOST`
-*   `DB_PORT`
-*   `DB_USER`
-*   `DB_PASS`
-*   `DB_NAME`
-*   `EMAIL_USER`
-*   `EMAIL_PASS` (QQ Mail Authorization Code)
+| Secret Name | Description |
+| :--- | :--- |
+| `DB_HOST` | Aiven Database Host |
+| `DB_PORT` | Database Port (usually 24811) |
+| `DB_USER` | Database User (usually avnadmin) |
+| `DB_PASS` | Database Password |
+| `DB_NAME` | Database Name (usually defaultdb) |
+| `EMAIL_USER` | Sender Email (e.g., 123456@qq.com) |
+| `EMAIL_PASS` | **QQ Mail SMTP Authorization Code** (Not login password) |
 
-### 3. Local Testing
-You can test locally by setting environment variables first:
-bash
-export DB_HOST=your_host
-export DB_PORT=your_port
-... (fill all secrets)
-python remind_engine.py
+### 3. Execution Logic
+
+Due to potential instability in GitHub Actions scheduling (sometimes delayed by 1–3 hours), this project relies on **business logic fallback** rather than strict Cron timing:
+
+1.  GitHub Actions runs **once per hour**.
+2.  The Python script checks if the current time is **later than or equal to** `send_time`.
+3.  If yes, and the reminder has not been sent today, it sends the email immediately.
+
+✅ This design ensures that even if GitHub runs late, the daily reminder will not be missed.
+
+---
+
+> 📄 中文文档请见：[README.zh-CN.md](./README.zh-CN.md)
