@@ -1,31 +1,26 @@
-name: Remind Scheduler
+name: Daily Reminder Bot
 
 on:
-  # 定时触发（每 5 分钟一次）
   schedule:
-    - cron: "*/5 * * * *"
-
-  # 允许手动触发（调试用）
+    # 每小时运行一次，确保不漏发
+    - cron: '5 * * * *'
   workflow_dispatch:
 
 jobs:
-  run:
+  run-reminder:
     runs-on: ubuntu-latest
-
     steps:
       - uses: actions/checkout@v4
-
-      - name: Set up Python
-        uses: actions/setup-python@v5
+      - uses: actions/setup-python@v5
         with:
-          python-version: "3.11"
-
-      - name: Install dependencies
-        run: |
-          pip install requests pytz
-
-      - name: Run remind engine
-        env:
+          python-version: '3.10'
+      - run: pip install pymysql requests pytz
+      - env:
+          DB_HOST: ${{ secrets.DB_HOST }}
+          DB_PORT: ${{ secrets.DB_PORT }}
+          DB_USER: ${{ secrets.DB_USER }}
+          DB_PASS: ${{ secrets.DB_PASS }}
+          DB_NAME: ${{ secrets.DB_NAME }}
           EMAIL_USER: ${{ secrets.EMAIL_USER }}
           EMAIL_PASS: ${{ secrets.EMAIL_PASS }}
         run: python remind_engine.py
