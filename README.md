@@ -1,9 +1,6 @@
 🌐 Language / 语言
 - [English](./README.md)
 - [中文](./README.zh-CN.md)
-# ==================================================
-# 📄 README.md (English Version)
-# ==================================================
 # 📅 Daily Reminder System
 
 An automated reminder system that sends emails based on configurations stored in a MySQL database. It supports one-time notifications, general reminders, and recurring important reminders (daily/weekly/monthly).
