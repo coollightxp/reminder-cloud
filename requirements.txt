@@ -1,2 +1,2 @@
-pymysql
-pytz
+PyMySQL>=1.0.2
+pytz>=2022.1
