@@ -84,7 +84,8 @@ def main():
     )
 
     cur = conn.cursor(pymysql.cursors.DictCursor)
-    cur.execute("SELECT * FROM reminders WHERE status IN ('pending','notified')")
+    # 只查未完成的，或者今天可能还需要发的重要提醒
+    cur.execute("SELECT * FROM reminders WHERE status IN ('pending', 'notified')")
     rows = cur.fetchall()
 
     print(f"📊 共加载 {len(rows)} 条提醒\n")
@@ -97,11 +98,12 @@ def main():
         advance = normalize_advance_days(rule, row['advance_days'])
         window_start = row['event_date'] - timedelta(days=advance)
 
+        # 还没到提前提醒的窗口期
         if TODAY < window_start:
             print("❌ 还没到提醒时间")
             continue
 
-        # ===== weekly / monthly 精确匹配（人类版）=====
+        # ===== weekly / monthly 精确匹配（人类版 1-7）=====
         if rule.startswith('weekly:'):
             target_weekday = int(rule.split(':')[1]) - 1  # 1-7 转 0-6
             if TODAY.weekday() != target_weekday:
@@ -112,7 +114,7 @@ def main():
             if TODAY.day != target_day:
                 continue
 
-        # ===== notify =====
+        # ===== notify (一次性通知) =====
         if row['remind_type'] == 'notify':
             if TODAY != row['event_date']:
                 continue
@@ -121,12 +123,14 @@ def main():
                 continue
             try:
                 send_mail(row['to_email'], row['member_name'], row['title'], row['content'])
-                cur.execute("UPDATE reminders SET status='notified' WHERE id=%s", (row['id'],))
+                # ✅ 修正点：一次性通知发完即结束
+                cur.execute("UPDATE reminders SET status='completed' WHERE id=%s", (row['id'],))
+                print("✅ 状态已更新为 completed")
             except Exception as e:
                 print(f"❌ 邮件失败: {e}")
             continue
 
-        # ===== normal =====
+        # ===== normal (普通提醒) =====
         if row['remind_type'] == 'normal':
             if TODAY != window_start:
                 continue
@@ -135,26 +139,34 @@ def main():
                 continue
             try:
                 send_mail(row['to_email'], row['member_name'], row['title'], row['content'])
+                # ✅ 修正点：普通提醒发完即结束
                 cur.execute("UPDATE reminders SET status='completed' WHERE id=%s", (row['id'],))
+                print("✅ 状态已更新为 completed")
             except Exception as e:
                 print(f"❌ 邮件失败: {e}")
             continue
 
-        # ===== important =====
+        # ===== important (重要循环提醒) =====
         if row['remind_type'] == 'important':
             if TODAY > row['expire_date']:
                 cur.execute("UPDATE reminders SET status='completed' WHERE id=%s", (row['id'],))
                 print("⏰ 已过期，标记为完成")
                 continue
+            
+            # ✅ 防重发核心：今天已经发过了
             if row['last_sent_date'] == TODAY:
                 print("❌ 今天已发过")
                 continue
+            
             if NOW_TIME < row['send_time']:
                 print("❌ 时间未到")
                 continue
+            
             try:
                 send_mail(row['to_email'], row['member_name'], row['title'], row['content'])
-                cur.execute("UPDATE reminders SET last_sent_date=%s WHERE id=%s", (TODAY, row['id']))
+                # ✅ 只更新发送日期，不改状态，下周/下个月还能跑
+                cur.execute("UPDATE reminders SET last_sent_date=%s WHERE id=%s", (TODAY, row['id'],))
+                print("✅ 重要提醒已发送，记录今日日期")
             except Exception as e:
                 print(f"❌ 邮件失败: {e}")
             continue
