@@ -1,93 +1,59 @@
-import sqlite3
 import os
-import smtplib
-from email.mime.text import MIMEText
-from email.header import Header
+import pymysql
+import requests
+from datetime import datetime, timedelta
 import pytz
-from datetime import datetime, date, time, timedelta
-import json
-import urllib.request
-import calendar
 
 # ===============================
-# 基础配置
+# 基础配置（从环境变量读取）
 # ===============================
-DB_PATH = os.path.join(os.path.dirname(__file__), "db", "reminder.db")
+DB_HOST = os.environ.get("DB_HOST")
+DB_PORT = int(os.environ.get("DB_PORT"))
+DB_USER = os.environ.get("DB_USER")
+DB_PASS = os.environ.get("DB_PASS")
+DB_NAME = os.environ.get("DB_NAME")
+
 BEIJING_TZ = pytz.timezone("Asia/Shanghai")
 NOW_DT = datetime.now(BEIJING_TZ)
+TODAY = NOW_DT.date()
 NOW_TIME = NOW_DT.time()
-TODAY = date.today()
-TODAY_STR = TODAY.isoformat()
 
 print(f"\n🚀 脚本启动 - 当前时间: {NOW_DT.strftime('%Y-%m-%d %H:%M:%S')}\n")
 
 # ===============================
-# 节假日 / 工作日判断
+# 节假日判断
 # ===============================
 def is_workday(d):
     try:
         url = f"https://natescarlet.coding.net/p/holiday/d/holiday/git/raw/master/{d.year}/{d}.json"
-        with urllib.request.urlopen(url, timeout=5) as resp:
-            data = json.loads(resp.read().decode())
-            return data.get("code", 0) == 0
-    except Exception as e:
-        print(f"⚠️ 节假日接口失败: {e}")
+        r = requests.get(url, timeout=(3, 5))
+        return r.json().get("code", 0) == 0
+    except Exception:
         return True
 
 # ===============================
-# 时间解析
+# 提前天数约束
 # ===============================
-def parse_time(t):
-    t = str(t).strip()
-    for fmt in ("%H:%M:%S", "%H:%M"):
-        try:
-            return datetime.strptime(t, fmt).time()
-        except ValueError:
-            continue
-    return None
+def normalize_advance_days(rule, adv):
+    try:
+        adv = int(adv or 0)
+    except:
+        adv = 0
 
-# ===============================
-# 核心算法：周期性任务自动计算发送日
-# ===============================
-def calc_periodic_send_date(row):
-    rule = row["repeat_rule"]
-    advance = int(row["advance_days"] or 0)
-    today = TODAY
-
-    if rule == "daily":
-        target = today
-        send = target - timedelta(days=advance)
-        return today == send, target, send
-
-    if rule.startswith("weekly:"):
-        wd = today.weekday()
-        days = list(map(int, rule.split(":")[1].split(",")))
-        if wd not in days:
-            return False, today, today
-        target = today
-        send = target - timedelta(days=advance)
-        return today == send, target, send
-
-    if rule.startswith("monthly:"):
-        target_day = int(rule.split(":")[1])
-        max_day = calendar.monthrange(today.year, today.month)[1]
-        actual_target = min(target_day, max_day)
-        target = date(today.year, today.month, actual_target)
-        send = target - timedelta(days=advance)
-        return today == send, target, send
-
-    if rule.startswith("yearly:"):
-        md = rule.split(":")[1]
-        target = datetime.strptime(f"{today.year}-{md}", "%Y-%m-%d").date()
-        send = target - timedelta(days=advance)
-        return today == send, target, send
-
-    return False, today, today
+    if rule and rule.startswith('weekly'):
+        return min(max(adv, 0), 2)
+    elif rule and rule.startswith('monthly'):
+        return min(max(adv, 0), 5)
+    return adv
 
 # ===============================
 # 邮件发送
 # ===============================
 def send_mail(to_email, member_name, title, content):
+    import smtplib
+    from email.mime.text import MIMEText
+    from email.header import Header
+
     user = os.environ["EMAIL_USER"]
     pwd = os.environ["EMAIL_PASS"]
 
@@ -96,107 +62,104 @@ def send_mail(to_email, member_name, title, content):
     msg["To"] = to_email
     msg["Subject"] = Header(title, "utf-8")
 
-    try:
-        server = smtplib.SMTP_SSL("smtp.qq.com", 465)
-        server.login(user, pwd)
-        server.sendmail(user, [to_email], msg.as_string())
-        server.quit()
-        print(f"✅ 邮件发送成功 -> {to_email}")
-        return True
-    except Exception as e:
-        print(f"❌ 邮件发送失败: {e}")
-        return False
+    server = smtplib.SMTP_SSL("smtp.qq.com", 465)
+    server.login(user, pwd)
+    server.sendmail(user, [to_email], msg.as_string())
+    server.quit()
+
+    print(f"✅ 邮件发送成功 -> {to_email}")
 
 # ===============================
 # 主逻辑
 # ===============================
 def main():
-    conn = sqlite3.connect(DB_PATH)
-    conn.row_factory = sqlite3.Row
-    cur = conn.cursor()
-    cur.execute("SELECT * FROM reminders")
+    conn = pymysql.connect(
+        host=DB_HOST,
+        port=DB_PORT,
+        user=DB_USER,
+        password=DB_PASS,
+        database=DB_NAME,
+        charset="utf8mb4",
+        ssl={"ssl": {}}
+    )
+
+    cur = conn.cursor(pymysql.cursors.DictCursor)
+    cur.execute("SELECT * FROM reminders WHERE status IN ('pending','notified')")
     rows = cur.fetchall()
 
     print(f"📊 共加载 {len(rows)} 条提醒\n")
 
     for row in rows:
-        print("==============================================")
-        print(f"检查任务 ID: {row['id']} | 标题: {row['title']}")
-        
-        can_send = False
+        print("=" * 50)
+        print(f"ID:{row['id']} | {row['title']} | 类型:{row['remind_type']}")
 
-        # ---- 1. 一次性任务 ----
-        if row["repeat_rule"] is None:
-            print("\n🟢 [类型] 一次性任务")
+        rule = row['repeat_rule'] or ''
+        advance = normalize_advance_days(rule, row['advance_days'])
+        window_start = row['event_date'] - timedelta(days=advance)
 
-            if row["is_sent"] == 1:
-                print("❌ 结论：已发送，跳过")
+        if TODAY < window_start:
+            print("❌ 还没到提醒时间")
+            continue
+
+        # ===== weekly / monthly 精确匹配（人类版）=====
+        if rule.startswith('weekly:'):
+            target_weekday = int(rule.split(':')[1]) - 1  # 1-7 转 0-6
+            if TODAY.weekday() != target_weekday:
                 continue
 
+        elif rule.startswith('monthly:'):
+            target_day = int(rule.split(':')[1])
+            if TODAY.day != target_day:
+                continue
+
+        # ===== notify =====
+        if row['remind_type'] == 'notify':
+            if TODAY != row['event_date']:
+                continue
+            if row['skip_holiday'] == 1 and (TODAY.weekday() >= 5 or not is_workday(TODAY)):
+                print("⏸️ 通知跳过：非工作日")
+                continue
             try:
-                target_date = date.fromisoformat(row["remind_date"])
+                send_mail(row['to_email'], row['member_name'], row['title'], row['content'])
+                cur.execute("UPDATE reminders SET status='notified' WHERE id=%s", (row['id'],))
             except Exception as e:
-                print(f"❌ remind_date 解析失败: {e}")
+                print(f"❌ 邮件失败: {e}")
+            continue
+
+        # ===== normal =====
+        if row['remind_type'] == 'normal':
+            if TODAY != window_start:
                 continue
-
-            advance = int(row["advance_days"] or 0)
-            send_on_date = target_date - timedelta(days=advance)
-
-            print(f"   原定日期: {target_date}")
-            print(f"   提前天数: {advance}")
-            print(f"   ➜ 应发送日: {send_on_date} | 今天: {TODAY}")
-
-            if send_on_date == TODAY:
-                can_send = True
-
-        # ---- 2. 周期性任务 ----
-        else:
-            print("\n🟢 [类型] 周期性任务")
-            ok, target_date, send_on_date = calc_periodic_send_date(row)
-
-            print(f"   规则: {row['repeat_rule']}")
-            print(f"   原定日期: {target_date}")
-            print(f"   提前天数: {row['advance_days']}")
-            print(f"   ➜ 应发送日: {send_on_date} | 今天: {TODAY}")
-
-            if not ok:
-                print("❌ 结论：今天不符合周期规则")
+            if row['skip_holiday'] == 1 and (TODAY.weekday() >= 5 or not is_workday(TODAY)):
+                print("⏸️ 提醒跳过：非工作日")
                 continue
+            try:
+                send_mail(row['to_email'], row['member_name'], row['title'], row['content'])
+                cur.execute("UPDATE reminders SET status='completed' WHERE id=%s", (row['id'],))
+            except Exception as e:
+                print(f"❌ 邮件失败: {e}")
+            continue
 
-            # ✅ 核心防重发逻辑：检查今天是否已签到
-            if row["last_done"] == TODAY_STR:
-                print("❌ 结论：今天已经提醒过，不再重复发送")
+        # ===== important =====
+        if row['remind_type'] == 'important':
+            if TODAY > row['expire_date']:
+                cur.execute("UPDATE reminders SET status='completed' WHERE id=%s", (row['id'],))
+                print("⏰ 已过期，标记为完成")
                 continue
-
-            if row["repeat_rule"] == "daily" and row["skip_holiday"] == 1:
-                if not is_workday(TODAY):
-                    print("❌ 结论：节假日，跳过")
-                    continue
-
-            can_send = True
-
-        # ---- 3. 时间宽容 + 统一发送入口 ----
-        if can_send:
-            send_time_obj = parse_time(row["send_time"])
-            print(f"   发送时间: {send_time_obj} | 当前时间: {NOW_TIME}")
-
-            if not send_time_obj or send_time_obj > NOW_TIME:
-                print("❌ 结论：时间未到，跳过")
+            if row['last_sent_date'] == TODAY:
+                print("❌ 今天已发过")
                 continue
+            if NOW_TIME < row['send_time']:
+                print("❌ 时间未到")
+                continue
+            try:
+                send_mail(row['to_email'], row['member_name'], row['title'], row['content'])
+                cur.execute("UPDATE reminders SET last_sent_date=%s WHERE id=%s", (TODAY, row['id']))
+            except Exception as e:
+                print(f"❌ 邮件失败: {e}")
+            continue
 
-            print("🚀 条件全部满足，准备发送！")
-
-            if send_mail(row["to_email"], row["member_name"], row["title"], row["content"]):
-                # ✅ 发送成功，更新状态
-                if row["repeat_rule"] is None:
-                    cur.execute("UPDATE reminders SET is_sent=1 WHERE id=?", (row["id"],))
-                else:
-                    cur.execute("UPDATE reminders SET last_done=? WHERE id=?", (TODAY_STR, row["id"]))
-                conn.commit()
-                print(f"✅ 状态已更新 (ID: {row['id']})")
-        else:
-            print("\n⏸️ 该任务今日不发送")
-
+    conn.commit()
     conn.close()
     print("\n🎉 执行完成")
 
