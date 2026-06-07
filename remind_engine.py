@@ -107,34 +107,36 @@ def main():
                 continue
         elif rule == 'daily':
             pass
-        else:  # 一次性提醒
-            if TODAY != window_start:
-                continue
-
-        # ===== 节假日跳过 =====
-        if row['skip_holiday'] == 1 and (TODAY.weekday() >= 5 or not is_workday(TODAY)):
-            print("⏸️ 跳过：非工作日")
-            continue
-
+        
         # ===== 过期检查（寿命终结）=====
-        # 注意：这里是 >，不是 >=。今天到期不算死，明天才算。
+        # 注意：这里是 >，今天到期不算死，明天才算。
         if TODAY > row['expire_date']:
             cur.execute("UPDATE reminders SET status='completed' WHERE id=%s", (row['id'],))
             conn.commit()
             print("⏰ 提醒已过期，标记为 completed")
             continue
 
-        # ===== Notify（通知）=====
+        # ===== 一次性提醒的日期匹配 =====
+        if not rule and TODAY != window_start:
+            continue
+
+        # ===== 节假日跳过 =====
+        if row['skip_holiday'] == 1 and (TODAY.weekday() >= 5 or not is_workday(TODAY)):
+            print("⏸️ 跳过：非工作日")
+            continue
+
+        # ===== Notify（通知 - 修正核心）=====
         if row['remind_type'] == 'notify':
             try:
                 send_mail(row['to_email'], row['member_name'], row['title'], row['content'])
-                if not rule:
-                    cur.execute("UPDATE reminders SET status='completed' WHERE id=%s", (row['id'],))
-                    print("✅ 一次性 Notify → completed")
-                else:
-                    cur.execute("UPDATE reminders SET last_sent_date=%s WHERE id=%s", (TODAY, row['id'],))
-                    print("✅ 循环 Notify 已发送")
+                
+                # ✅ 关键修正：
+                # 无论你是 daily / weekly / 一次性
+                # 只要发过，就 completed，绝不再发
+                cur.execute("UPDATE reminders SET status='completed' WHERE id=%s", (row['id'],))
                 conn.commit()
+                
+                print("✅ Notify 已发送并已 completed")
             except Exception as e:
                 print(f"❌ 邮件失败: {e}")
             continue
@@ -152,9 +154,7 @@ def main():
         try:
             send_mail(row['to_email'], row['member_name'], row['title'], row['content'])
             
-            # ✅ 核心修正点：
-            # Normal 发完就 completed
-            # Important 发完只记日期
+            # ✅ Normal 发完 completed，Important 记录日期
             if row['remind_type'] == 'normal':
                 cur.execute("UPDATE reminders SET status='completed' WHERE id=%s", (row['id'],))
                 print("✅ Normal 提醒已发送并已 completed")
