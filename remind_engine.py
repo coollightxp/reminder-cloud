@@ -90,25 +90,12 @@ def main():
         advance = normalize_advance_days(rule, row['advance_days'])
         window_start = row['event_date'] - timedelta(days=advance)
 
-        # ============================================================
-        # ✅ 第一步：先处理“死掉的规则”（最关键）
-        # ============================================================
-        if TODAY > row['expire_date']:
-            cur.execute("UPDATE reminders SET status='completed' WHERE id=%s", (row['id'],))
-            conn.commit()  # ✅ 立刻落库
-            print("⏰ 已过期 → completed")
-            continue
-
-        # ============================================================
-        # ✅ 第二步：还没到提醒窗口，直接跳过
-        # ============================================================
+        # 还没到提前提醒的窗口期
         if TODAY < window_start:
             print("❌ 还没到提醒时间")
             continue
 
-        # ============================================================
-        # ✅ 第三步：循环规则匹配
-        # ============================================================
+        # ===== 循环规则匹配 =====
         if rule.startswith('weekly:'):
             if TODAY.weekday() != int(rule.split(':')[1]) - 1:
                 continue
@@ -124,16 +111,20 @@ def main():
             if TODAY != window_start:
                 continue
 
-        # ============================================================
-        # ✅ 第四步：节假日
-        # ============================================================
+        # ===== 节假日跳过 =====
         if row['skip_holiday'] == 1 and (TODAY.weekday() >= 5 or not is_workday(TODAY)):
             print("⏸️ 跳过：非工作日")
             continue
 
-        # ============================================================
-        # ✅ 第五步：Notify vs Reminder 分流
-        # ============================================================
+        # ===== 过期检查（寿命终结）=====
+        # 注意：这里是 >，不是 >=。今天到期不算死，明天才算。
+        if TODAY > row['expire_date']:
+            cur.execute("UPDATE reminders SET status='completed' WHERE id=%s", (row['id'],))
+            conn.commit()
+            print("⏰ 提醒已过期，标记为 completed")
+            continue
+
+        # ===== Notify（通知）=====
         if row['remind_type'] == 'notify':
             try:
                 send_mail(row['to_email'], row['member_name'], row['title'], row['content'])
@@ -143,14 +134,13 @@ def main():
                 else:
                     cur.execute("UPDATE reminders SET last_sent_date=%s WHERE id=%s", (TODAY, row['id'],))
                     print("✅ 循环 Notify 已发送")
-                conn.commit()  # ✅ 立刻落库
+                conn.commit()
             except Exception as e:
                 print(f"❌ 邮件失败: {e}")
             continue
 
-        # ============================================================
-        # ✅ Reminder（Normal / Important）
-        # ============================================================
+        # ===== Reminder（提醒）=====
+        # Important 专属逻辑
         if row['remind_type'] == 'important':
             if NOW_TIME < row['send_time']:
                 print("❌ 时间未到")
@@ -161,10 +151,18 @@ def main():
 
         try:
             send_mail(row['to_email'], row['member_name'], row['title'], row['content'])
-            print("✅ 提醒已发送")
-            if row['remind_type'] == 'important':
+            
+            # ✅ 核心修正点：
+            # Normal 发完就 completed
+            # Important 发完只记日期
+            if row['remind_type'] == 'normal':
+                cur.execute("UPDATE reminders SET status='completed' WHERE id=%s", (row['id'],))
+                print("✅ Normal 提醒已发送并已 completed")
+            elif row['remind_type'] == 'important':
                 cur.execute("UPDATE reminders SET last_sent_date=%s WHERE id=%s", (TODAY, row['id'],))
-            conn.commit()  # ✅ 立刻落库
+                print("✅ Important 提醒已发送")
+            
+            conn.commit()
         except Exception as e:
             print(f"❌ 邮件失败: {e}")
         continue
