@@ -40,7 +40,7 @@ def normalize_advance_days(rule, adv):
     except:
         adv = 0
     if rule and rule.startswith(('weekly', 'monthly', 'yearly')):
-        return min(max(adv, 0), 30) # 年循环最多提前30天
+        return min(max(adv, 0), 30)
     return adv
 
 # ===============================
@@ -90,92 +90,72 @@ def main():
         advance = normalize_advance_days(rule, row['advance_days'])
         window_start = row['event_date'] - timedelta(days=advance)
 
-        # 还没到提前提醒的窗口期
         if TODAY < window_start:
             print("❌ 还没到提醒时间")
             continue
 
-        # ===========================
-        # 循环规则匹配 (Weekly / Monthly / Yearly)
-        # ===========================
+        # ===== 循环规则匹配 =====
         if rule.startswith('weekly:'):
-            target_weekday = int(rule.split(':')[1]) - 1
-            if TODAY.weekday() != target_weekday:
+            if TODAY.weekday() != int(rule.split(':')[1]) - 1:
                 continue
         elif rule.startswith('monthly:'):
-            target_day = int(rule.split(':')[1])
-            if TODAY.day != target_day:
+            if TODAY.day != int(rule.split(':')[1]):
                 continue
         elif rule.startswith('yearly:'):
-            target_month_day = rule.split(':')[1]  # MM-DD
-            today_str = TODAY.strftime('%m-%d')
-            if today_str != target_month_day:
+            if TODAY.strftime('%m-%d') != rule.split(':')[1]:
                 continue
         elif rule == 'daily':
-            pass # 每天执行，直接放行
+            pass
         
-        # ===========================
-        # Notify（通知：无提前概念）
-        # ===========================
+        # ===== Notify（通知）=====
         if row['remind_type'] == 'notify':
-            # 一次性通知检查
             if not rule and TODAY != row['event_date']:
                 continue
 
-            # 节假日跳过逻辑
             if row['skip_holiday'] == 1 and (TODAY.weekday() >= 5 or not is_workday(TODAY)):
                 print("⏸️ 通知跳过：非工作日")
                 continue
 
             try:
                 send_mail(row['to_email'], row['member_name'], row['title'], row['content'])
-                
-                if not rule: # 没有规则 = 一次性
+                if not rule:
                     cur.execute("UPDATE reminders SET status='completed' WHERE id=%s", (row['id'],))
                     print("✅ 一次性 Notify 已 completed")
-                else: # 循环通知
+                else:
                     cur.execute("UPDATE reminders SET last_sent_date=%s WHERE id=%s", (TODAY, row['id'],))
                     print("✅ 循环 Notify 已发送")
-                    
             except Exception as e:
                 print(f"❌ 邮件失败: {e}")
             continue
 
-        # ===========================
-        # Reminder（提醒：有提前概念，循环）
-        # ===========================
-        # 过期检查
+        # ===== Reminder（提醒）=====
+        # ✅ 过期检查（Normal & Important 通用）
         if TODAY > row['expire_date']:
             cur.execute("UPDATE reminders SET status='completed' WHERE id=%s", (row['id'],))
             print("⏰ 提醒已过期，标记为 completed")
             continue
-            
-        # 一次性提醒的日期匹配
+
         if not rule and TODAY != window_start:
             continue
 
-        # 节假日跳过
         if row['skip_holiday'] == 1 and (TODAY.weekday() >= 5 or not is_workday(TODAY)):
             print("⏸️ 提醒跳过：非工作日")
             continue
 
-        # 时间窗口检查 (Important 专用)
-        if row['remind_type'] == 'important' and NOW_TIME < row['send_time']:
-            print("❌ 时间未到")
-            continue
-            
-        # 防重发 (Important 专用)
-        if row['remind_type'] == 'important' and row['last_sent_date'] == TODAY:
-            print("❌ 今天已发过")
-            continue
+        # Important 专属逻辑
+        if row['remind_type'] == 'important':
+            if NOW_TIME < row['send_time']:
+                print("❌ 时间未到")
+                continue
+            if row['last_sent_date'] == TODAY:
+                print("❌ 今天已发过")
+                continue
 
         try:
             send_mail(row['to_email'], row['member_name'], row['title'], row['content'])
             print("✅ 提醒已发送")
-            
             if row['remind_type'] == 'important':
                 cur.execute("UPDATE reminders SET last_sent_date=%s WHERE id=%s", (TODAY, row['id'],))
-                
         except Exception as e:
             print(f"❌ 邮件失败: {e}")
         continue
