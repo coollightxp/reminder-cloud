@@ -90,11 +90,25 @@ def main():
         advance = normalize_advance_days(rule, row['advance_days'])
         window_start = row['event_date'] - timedelta(days=advance)
 
+        # ============================================================
+        # ✅ 第一步：先处理“死掉的规则”（最关键）
+        # ============================================================
+        if TODAY > row['expire_date']:
+            cur.execute("UPDATE reminders SET status='completed' WHERE id=%s", (row['id'],))
+            conn.commit()  # ✅ 立刻落库
+            print("⏰ 已过期 → completed")
+            continue
+
+        # ============================================================
+        # ✅ 第二步：还没到提醒窗口，直接跳过
+        # ============================================================
         if TODAY < window_start:
             print("❌ 还没到提醒时间")
             continue
 
-        # ===== 循环规则匹配 =====
+        # ============================================================
+        # ✅ 第三步：循环规则匹配
+        # ============================================================
         if rule.startswith('weekly:'):
             if TODAY.weekday() != int(rule.split(':')[1]) - 1:
                 continue
@@ -106,43 +120,37 @@ def main():
                 continue
         elif rule == 'daily':
             pass
-        
-        # ===== Notify（通知）=====
+        else:  # 一次性提醒
+            if TODAY != window_start:
+                continue
+
+        # ============================================================
+        # ✅ 第四步：节假日
+        # ============================================================
+        if row['skip_holiday'] == 1 and (TODAY.weekday() >= 5 or not is_workday(TODAY)):
+            print("⏸️ 跳过：非工作日")
+            continue
+
+        # ============================================================
+        # ✅ 第五步：Notify vs Reminder 分流
+        # ============================================================
         if row['remind_type'] == 'notify':
-            if not rule and TODAY != row['event_date']:
-                continue
-
-            if row['skip_holiday'] == 1 and (TODAY.weekday() >= 5 or not is_workday(TODAY)):
-                print("⏸️ 通知跳过：非工作日")
-                continue
-
             try:
                 send_mail(row['to_email'], row['member_name'], row['title'], row['content'])
                 if not rule:
                     cur.execute("UPDATE reminders SET status='completed' WHERE id=%s", (row['id'],))
-                    print("✅ 一次性 Notify 已 completed")
+                    print("✅ 一次性 Notify → completed")
                 else:
                     cur.execute("UPDATE reminders SET last_sent_date=%s WHERE id=%s", (TODAY, row['id'],))
                     print("✅ 循环 Notify 已发送")
+                conn.commit()  # ✅ 立刻落库
             except Exception as e:
                 print(f"❌ 邮件失败: {e}")
             continue
 
-        # ===== Reminder（提醒）=====
-        # ✅ 过期检查（Normal & Important 通用）
-        if TODAY > row['expire_date']:
-            cur.execute("UPDATE reminders SET status='completed' WHERE id=%s", (row['id'],))
-            print("⏰ 提醒已过期，标记为 completed")
-            continue
-
-        if not rule and TODAY != window_start:
-            continue
-
-        if row['skip_holiday'] == 1 and (TODAY.weekday() >= 5 or not is_workday(TODAY)):
-            print("⏸️ 提醒跳过：非工作日")
-            continue
-
-        # Important 专属逻辑
+        # ============================================================
+        # ✅ Reminder（Normal / Important）
+        # ============================================================
         if row['remind_type'] == 'important':
             if NOW_TIME < row['send_time']:
                 print("❌ 时间未到")
@@ -156,11 +164,11 @@ def main():
             print("✅ 提醒已发送")
             if row['remind_type'] == 'important':
                 cur.execute("UPDATE reminders SET last_sent_date=%s WHERE id=%s", (TODAY, row['id'],))
+            conn.commit()  # ✅ 立刻落库
         except Exception as e:
             print(f"❌ 邮件失败: {e}")
         continue
 
-    conn.commit()
     conn.close()
     print("\n🎉 执行完成")
 
